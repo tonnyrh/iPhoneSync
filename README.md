@@ -183,5 +183,5 @@ Run the `.ps1` file in PowerShell.
 If needed, start PowerShell with an execution policy that allows local scripts, for example:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\iPhoneMediaSync.ps1
+powershell.exe -ExecutionPolicy Bypass -File .\iPhoneSync.ps1
 
