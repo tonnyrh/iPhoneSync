@@ -34,6 +34,7 @@ $script:Config = @{
     TopFolderWarmupPauseSeconds         = 3
     TopFolderProcessMaxRounds           = 20
     MasterDiscoveryMaxRounds            = 20
+    MasterEmptyDiscoveryTolerance       = 4
     EnumerationRetryCount               = 3
     EnumerationRetryDelayMs             = 700
     FileReadyTimeoutSeconds             = 45
@@ -70,6 +71,7 @@ function New-DefaultAppConfig {
     return [ordered]@{
         LastSourceDisplay = ''
         LastTargetFolder  = ''
+        PendingSyncState  = $null
     }
 }
 
@@ -94,6 +96,10 @@ function Initialize-AppConfig {
 
                 if ($null -ne $loaded.PSObject.Properties['LastTargetFolder']) {
                     $script:AppConfig.LastTargetFolder = [string]$loaded.LastTargetFolder
+                }
+
+                if ($null -ne $loaded.PSObject.Properties['PendingSyncState']) {
+                    $script:AppConfig.PendingSyncState = $loaded.PendingSyncState
                 }
             }
         }
@@ -143,6 +149,127 @@ function Update-AppConfigFromUi {
         $script:AppConfig.LastTargetFolder = [string]$TargetFolder
     }
 
+    Save-AppConfig
+}
+
+function New-PendingSyncState {
+    param(
+        [string]$SourceDisplay,
+        [string]$TargetFolder
+    )
+
+    return [ordered]@{
+        IsPending                  = $true
+        SourceDisplay              = [string]$SourceDisplay
+        TargetFolder               = [string]$TargetFolder
+        CompletedTopFolders        = @()
+        LastCompletedTopFolderName = ''
+        LastCompletedTopFolderSafeName = ''
+        UpdatedAt                  = (Get-Date).ToString('o')
+    }
+}
+
+function Get-PendingSyncStateForContext {
+    param(
+        [string]$SourceDisplay,
+        [string]$TargetFolder
+    )
+
+    if ($null -eq $script:AppConfig) {
+        return $null
+    }
+
+    $state = $script:AppConfig.PendingSyncState
+    if ($null -eq $state) {
+        return $null
+    }
+
+    $stateSource = [string]$state.SourceDisplay
+    $stateTarget = [string]$state.TargetFolder
+
+    if ($stateSource -ne [string]$SourceDisplay) {
+        return $null
+    }
+
+    if ($stateTarget -ne [string]$TargetFolder) {
+        return $null
+    }
+
+    if ($state.PSObject.Properties.Name -notcontains 'IsPending') {
+        return $null
+    }
+
+    if (-not [bool]$state.IsPending) {
+        return $null
+    }
+
+    return $state
+}
+
+function Start-PendingSyncTracking {
+    param(
+        [string]$SourceDisplay,
+        [string]$TargetFolder
+    )
+
+    if ($null -eq $script:AppConfig) {
+        $script:AppConfig = New-DefaultAppConfig
+    }
+
+    $existingState = Get-PendingSyncStateForContext -SourceDisplay $SourceDisplay -TargetFolder $TargetFolder
+
+    if ($null -ne $existingState) {
+        $script:AppConfig.PendingSyncState = $existingState
+        $script:AppConfig.PendingSyncState.UpdatedAt = (Get-Date).ToString('o')
+    }
+    else {
+        $script:AppConfig.PendingSyncState = New-PendingSyncState -SourceDisplay $SourceDisplay -TargetFolder $TargetFolder
+    }
+
+    Save-AppConfig
+}
+
+function Update-PendingSyncProgress {
+    param(
+        [string]$TopFolderName,
+        [string]$TopFolderSafeName
+    )
+
+    if ($null -eq $script:AppConfig) {
+        $script:AppConfig = New-DefaultAppConfig
+    }
+
+    if ($null -eq $script:AppConfig.PendingSyncState) {
+        $script:AppConfig.PendingSyncState = New-PendingSyncState -SourceDisplay $script:AppConfig.LastSourceDisplay -TargetFolder $script:AppConfig.LastTargetFolder
+    }
+
+    $completed = New-Object System.Collections.Generic.List[string]
+
+    if ($null -ne $script:AppConfig.PendingSyncState.CompletedTopFolders) {
+        foreach ($name in @($script:AppConfig.PendingSyncState.CompletedTopFolders)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$name) -and -not $completed.Contains([string]$name)) {
+                $completed.Add([string]$name)
+            }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($TopFolderSafeName) -and -not $completed.Contains($TopFolderSafeName)) {
+        $completed.Add($TopFolderSafeName)
+    }
+
+    $script:AppConfig.PendingSyncState.CompletedTopFolders = @($completed.ToArray())
+    $script:AppConfig.PendingSyncState.LastCompletedTopFolderName = [string]$TopFolderName
+    $script:AppConfig.PendingSyncState.LastCompletedTopFolderSafeName = [string]$TopFolderSafeName
+    $script:AppConfig.PendingSyncState.UpdatedAt = (Get-Date).ToString('o')
+    Save-AppConfig
+}
+
+function Clear-PendingSyncState {
+    if ($null -eq $script:AppConfig) {
+        $script:AppConfig = New-DefaultAppConfig
+    }
+
+    $script:AppConfig.PendingSyncState = $null
     Save-AppConfig
 }
 
@@ -201,15 +328,18 @@ function Set-Stats {
         [int]$Errors
     )
 
-    $text = "Top folders: {0} | Completed: {1} | Files seen: {2} | Diff: {3} | Copied: {4} | Skipped: {5} | Errors: {6}" -f $TopFoldersSeen, $TopFoldersDone, $FilesSeen, $Pending, $Copied, $Skipped, $Errors
+    $globalText = "Global folders - Seen: {0} | Completed: {1} || Global files - Copied: {2} | Skipped: {3} | Errors: {4}" -f $TopFoldersSeen, $TopFoldersDone, $Copied, $Skipped, $Errors
+    $currentFolderText = "Current folder files - Seen: {0} | Pending/Diff: {1}" -f $FilesSeen, $Pending
 
-    if ($script:lblStats.InvokeRequired) {
-        $null = $script:lblStats.Invoke([Action]{
-            $script:lblStats.Text = $text
+    if ($script:lblGlobalStats.InvokeRequired) {
+        $null = $script:lblGlobalStats.Invoke([Action]{
+            $script:lblGlobalStats.Text = $globalText
+            $script:lblFolderStats.Text = $currentFolderText
         })
     }
     else {
-        $script:lblStats.Text = $text
+        $script:lblGlobalStats.Text = $globalText
+        $script:lblFolderStats.Text = $currentFolderText
     }
 }
 
@@ -265,6 +395,50 @@ function Ensure-DirectoryExists {
     }
 }
 
+function Test-TargetFileExists {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FileName
+    )
+
+    try {
+        if (Test-Path -LiteralPath $TargetPath) {
+            return $true
+        }
+    }
+    catch {
+    }
+
+    try {
+        $item = Get-Item -LiteralPath $TargetPath -ErrorAction Stop
+        if ($null -ne $item) {
+            return $true
+        }
+    }
+    catch {
+    }
+
+    try {
+        $parentPath = Split-Path -Path $TargetPath -Parent
+        if (-not [string]::IsNullOrWhiteSpace($parentPath) -and (Test-Path -LiteralPath $parentPath)) {
+            $existingInFolder = Get-ChildItem -LiteralPath $parentPath -Force -File -ErrorAction Stop |
+                Where-Object { $_.Name -ieq $FileName } |
+                Select-Object -First 1
+
+            if ($null -ne $existingInFolder) {
+                return $true
+            }
+        }
+    }
+    catch {
+    }
+
+    return $false
+}
+
 function Get-ShellItemsSafe {
     param(
         [Parameter(Mandatory = $true)]
@@ -304,6 +478,60 @@ function Get-ItemSizeSafe {
     catch {
         return $null
     }
+}
+
+function Get-ShellItemFileNameSafe {
+    param(
+        [Parameter(Mandatory = $true)]
+        $ShellItem
+    )
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    try {
+        $value = [string]$ShellItem.ExtendedProperty('System.FileName')
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $candidates.Add($value)
+        }
+    }
+    catch {
+    }
+
+    try {
+        $value = [string]$ShellItem.ExtendedProperty('System.ParsingName')
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $candidates.Add($value)
+        }
+    }
+    catch {
+    }
+
+    try {
+        $value = [string]$ShellItem.Path
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $candidates.Add($value)
+        }
+    }
+    catch {
+    }
+
+    try {
+        $value = [string]$ShellItem.Name
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $candidates.Add($value)
+        }
+    }
+    catch {
+    }
+
+    foreach ($candidate in $candidates) {
+        $leaf = try { Split-Path -Path $candidate -Leaf } catch { $candidate }
+        if (-not [string]::IsNullOrWhiteSpace($leaf)) {
+            return $leaf
+        }
+    }
+
+    return $null
 }
 
 function Wait-ForFileReady {
@@ -485,7 +713,13 @@ function Get-ShellItemInFolderByName {
     $items = Get-ShellItemsSafe -ShellFolder $ShellFolder
 
     foreach ($item in $items) {
-        if (-not $item.IsFolder -and $item.Name -eq $Name) {
+        if ($item.IsFolder) {
+            continue
+        }
+
+        $fileName = Get-ShellItemFileNameSafe -ShellItem $item
+
+        if ($item.Name -eq $Name -or $fileName -eq $Name) {
             return $item
         }
     }
@@ -513,6 +747,8 @@ function Add-FileRecord {
         [Parameter(Mandatory = $true)]
         [string]$FileName,
 
+        [string]$DisplayName = '',
+
         [Nullable[int64]]$Size
     )
 
@@ -523,6 +759,7 @@ function Add-FileRecord {
         RelativeFilePath   = $relativeFilePath
         RelativeFolderPath = $RelativeFolderPath
         FileName           = $FileName
+        DisplayName        = $DisplayName
         SafeFileName       = $safeFileName
         Size               = $Size
     }
@@ -594,13 +831,18 @@ function Build-SourceIndexRecursive {
             continue
         }
 
-        $extension = [System.IO.Path]::GetExtension($name)
+        $fileName = Get-ShellItemFileNameSafe -ShellItem $item
+        if ([string]::IsNullOrWhiteSpace($fileName)) {
+            $fileName = $name
+        }
+
+        $extension = [System.IO.Path]::GetExtension($fileName)
         if ($script:Config.SkipExtensions.Count -gt 0 -and $script:Config.SkipExtensions -contains $extension) {
             continue
         }
 
         $size = Get-ItemSizeSafe -ShellItem $item
-        Add-FileRecord -Index $Index -RelativeFolderPath $RelativeFolderPath -FileName $name -Size $size
+        Add-FileRecord -Index $Index -RelativeFolderPath $RelativeFolderPath -FileName $fileName -DisplayName $name -Size $size
     }
 }
 
@@ -707,22 +949,9 @@ function Get-PendingFiles {
         $sourceFile = $SourceIndex.Files[$relativeFilePath]
         $targetPath = Join-Path -Path $TargetRoot -ChildPath $relativeFilePath
 
-        if (-not (Test-Path -LiteralPath $targetPath)) {
+        if (-not (Test-TargetFileExists -TargetPath $targetPath -FileName $sourceFile.SafeFileName)) {
             $pending.Add($sourceFile)
             continue
-        }
-
-        try {
-            $existing = Get-Item -LiteralPath $targetPath -ErrorAction Stop
-
-            if ($null -ne $sourceFile.Size) {
-                if ($existing.Length -ne $sourceFile.Size) {
-                    $pending.Add($sourceFile)
-                }
-            }
-        }
-        catch {
-            $pending.Add($sourceFile)
         }
     }
 
@@ -765,6 +994,11 @@ function Copy-OnePendingFile {
 
     $targetPath = Join-Path -Path $TargetTopFolderRoot -ChildPath $PendingFile.RelativeFilePath
 
+    if (Test-TargetFileExists -TargetPath $targetPath -FileName $PendingFile.SafeFileName) {
+        Write-Log -Message ('Skipping existing file: {0}' -f $PendingFile.RelativeFilePath) -LogBox $LogBox
+        return $false
+    }
+
     $shell = New-Object -ComObject Shell.Application
     $destinationShell = $shell.Namespace($destinationFolderPath)
 
@@ -781,6 +1015,8 @@ function Copy-OnePendingFile {
     if (-not $ready) {
         throw ('Timeout while verifying: {0}' -f $PendingFile.RelativeFilePath)
     }
+
+    return $true
 }
 
 function Process-OneTopFolderUntilStable {
@@ -822,6 +1058,7 @@ function Process-OneTopFolderUntilStable {
 
     $stableZeroDiffRounds = 0
     $lastPendingCount = -1
+    $countedSkippedFiles = [System.Collections.Generic.HashSet[string]]::new()
 
     for ($round = 1; $round -le $script:Config.TopFolderProcessMaxRounds; $round++) {
         if ($script:CancelRequested) {
@@ -856,8 +1093,22 @@ function Process-OneTopFolderUntilStable {
             $skipThisRound = 0
         }
 
+        $pendingPathSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($pendingFile in $pending) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$pendingFile.RelativeFilePath)) {
+                $null = $pendingPathSet.Add([string]$pendingFile.RelativeFilePath)
+            }
+        }
+
+        foreach ($sourceRelativeFilePath in $sourceIndex.Files.Keys) {
+            if (-not $pendingPathSet.Contains([string]$sourceRelativeFilePath) -and -not $countedSkippedFiles.Contains([string]$sourceRelativeFilePath)) {
+                $null = $countedSkippedFiles.Add([string]$sourceRelativeFilePath)
+                $TotalSkipped.Value++
+            }
+        }
+
         Write-Log -Message ('[{0}] Round {1}: folders={2}, files={3}, diff={4}' -f $topSafe, $round, $sourceIndex.FolderCount, $sourceIndex.FileCount, $pendingCount) -LogBox $LogBox
-        Set-Stats -TopFoldersSeen $TopFoldersSeen -TopFoldersDone $TopFoldersDone -FilesSeen $sourceIndex.FileCount -Pending $pendingCount -Copied $TotalCopied.Value -Skipped ($TotalSkipped.Value + $skipThisRound) -Errors $TotalErrors.Value
+        Set-Stats -TopFoldersSeen $TopFoldersSeen -TopFoldersDone $TopFoldersDone -FilesSeen $sourceIndex.FileCount -Pending $pendingCount -Copied $TotalCopied.Value -Skipped $TotalSkipped.Value -Errors $TotalErrors.Value
 
         if ($pendingCount -eq 0) {
             $stableZeroDiffRounds++
@@ -885,9 +1136,18 @@ function Process-OneTopFolderUntilStable {
 
             try {
                 Set-Status -Text ('Folder {0}: copying {1}/{2}' -f $topSafe, ($copiedThisRound + $errorsThisRound + 1), $pendingCount)
-                Copy-OnePendingFile -TopFolderShell $topFolderShell -PendingFile $file -TargetTopFolderRoot $targetTopFolderRoot -LogBox $LogBox
-                $copiedThisRound++
-                $TotalCopied.Value++
+                $copied = Copy-OnePendingFile -TopFolderShell $topFolderShell -PendingFile $file -TargetTopFolderRoot $targetTopFolderRoot -LogBox $LogBox
+
+                if ($copied) {
+                    $copiedThisRound++
+                    $TotalCopied.Value++
+                }
+                else {
+                    if (-not $countedSkippedFiles.Contains([string]$file.RelativeFilePath)) {
+                        $null = $countedSkippedFiles.Add([string]$file.RelativeFilePath)
+                        $TotalSkipped.Value++
+                    }
+                }
             }
             catch {
                 $errorsThisRound++
@@ -896,7 +1156,7 @@ function Process-OneTopFolderUntilStable {
             }
 
             [System.Windows.Forms.Application]::DoEvents()
-            Set-Stats -TopFoldersSeen $TopFoldersSeen -TopFoldersDone $TopFoldersDone -FilesSeen $sourceIndex.FileCount -Pending ($pendingCount - $copiedThisRound - $errorsThisRound) -Copied $TotalCopied.Value -Skipped ($TotalSkipped.Value + $skipThisRound) -Errors $TotalErrors.Value
+            Set-Stats -TopFoldersSeen $TopFoldersSeen -TopFoldersDone $TopFoldersDone -FilesSeen $sourceIndex.FileCount -Pending ($pendingCount - $copiedThisRound - $errorsThisRound) -Copied $TotalCopied.Value -Skipped $TotalSkipped.Value -Errors $TotalErrors.Value
         }
 
         Write-Log -Message ('[{0}] Round {1}: copied={2}, errors={3}' -f $topSafe, $round, $copiedThisRound, $errorsThisRound) -LogBox $LogBox
@@ -962,7 +1222,11 @@ function Run-PerTopFolderSync {
         [string]$TargetRoot,
 
         [Parameter(Mandatory = $true)]
-        [System.Windows.Forms.TextBox]$LogBox
+        [System.Windows.Forms.TextBox]$LogBox,
+
+        [string[]]$ResumeCompletedTopFolders = @(),
+
+        [string]$ResumeLastCompletedTopFolderName = ''
     )
 
     $totalCopied = 0
@@ -971,8 +1235,24 @@ function Run-PerTopFolderSync {
     $knownTopFolders = [System.Collections.Generic.HashSet[string]]::new()
     $completedTopFolders = [System.Collections.Generic.HashSet[string]]::new()
     $masterStableRounds = 0
+    $emptyDiscoveryRounds = 0
+
+    foreach ($completedTopFolder in @($ResumeCompletedTopFolders)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$completedTopFolder)) {
+            $null = $completedTopFolders.Add([string]$completedTopFolder)
+        }
+    }
 
     Ensure-DirectoryExists -Path $TargetRoot
+
+    if ($completedTopFolders.Count -gt 0) {
+        if ([string]::IsNullOrWhiteSpace($ResumeLastCompletedTopFolderName)) {
+            Write-Log -Message ('Resume mode: skipping {0} previously completed top folder(s).' -f $completedTopFolders.Count) -LogBox $LogBox
+        }
+        else {
+            Write-Log -Message ('Resume mode: continuing after top folder: {0}' -f $ResumeLastCompletedTopFolderName) -LogBox $LogBox
+        }
+    }
 
     for ($masterRound = 1; $masterRound -le $script:Config.MasterDiscoveryMaxRounds; $masterRound++) {
         if ($script:CancelRequested) {
@@ -983,7 +1263,31 @@ function Run-PerTopFolderSync {
         Write-Log -Message ('================ Master round {0} =================' -f $masterRound) -LogBox $LogBox
         Set-Status -Text ('Master round {0}: discovering top folders...' -f $masterRound)
 
+        $freshInternalStorageRootFolder = Get-IPhoneInternalStorageFolder
+        if ($null -ne $freshInternalStorageRootFolder) {
+            $InternalStorageRootFolder = $freshInternalStorageRootFolder
+        }
+        else {
+            Write-Log -Message 'Could not refresh iPhone Internal Storage before discovery. Using existing shell reference.' -LogBox $LogBox
+        }
+
         $topFolders = Get-TopFoldersFromInternalStorage -RootFolder $InternalStorageRootFolder
+
+        if ($topFolders.Count -eq 0 -and $knownTopFolders.Count -eq 0) {
+            $emptyDiscoveryRounds++
+            Write-Log -Message ('Master round {0}: iPhone returned 0 top folders. Empty discovery {1}/{2}' -f $masterRound, $emptyDiscoveryRounds, $script:Config.MasterEmptyDiscoveryTolerance) -LogBox $LogBox
+            Write-Log -Message 'If the iPhone asks whether to trust or allow this PC, unlock it and approve the USB connection.' -LogBox $LogBox
+            Set-Status -Text 'Waiting for iPhone approval/unlock...'
+
+            if ($emptyDiscoveryRounds -lt $script:Config.MasterEmptyDiscoveryTolerance) {
+                Start-Sleep -Seconds 2
+                [System.Windows.Forms.Application]::DoEvents()
+                continue
+            }
+        }
+        else {
+            $emptyDiscoveryRounds = 0
+        }
 
         $newTopFoldersThisRound = 0
         foreach ($top in $topFolders) {
@@ -1032,6 +1336,8 @@ function Run-PerTopFolderSync {
                 if (-not $completedTopFolders.Contains($top.SafeName)) {
                     $null = $completedTopFolders.Add($top.SafeName)
                 }
+
+                Update-PendingSyncProgress -TopFolderName $top.Name -TopFolderSafeName $top.SafeName
             }
 
             Set-Stats -TopFoldersSeen $knownTopFolders.Count -TopFoldersDone $completedTopFolders.Count -FilesSeen 0 -Pending 0 -Copied $totalCopied -Skipped $totalSkipped -Errors $totalErrors
@@ -1040,6 +1346,10 @@ function Run-PerTopFolderSync {
     }
 
     Set-Status -Text 'Ready'
+
+    if (-not $script:CancelRequested) {
+        Clear-PendingSyncState
+    }
 }
 
 # =========================
@@ -1119,15 +1429,21 @@ $script:lblStatus.Size = New-Object System.Drawing.Size(775, 20)
 $script:lblStatus.Text = 'Ready'
 $form.Controls.Add($script:lblStatus)
 
-$script:lblStats = New-Object System.Windows.Forms.Label
-$script:lblStats.Location = New-Object System.Drawing.Point(20, 260)
-$script:lblStats.Size = New-Object System.Drawing.Size(840, 20)
-$script:lblStats.Text = 'Top folders: 0 | Completed: 0 | Files seen: 0 | Diff: 0 | Copied: 0 | Skipped: 0 | Errors: 0'
-$form.Controls.Add($script:lblStats)
+$script:lblGlobalStats = New-Object System.Windows.Forms.Label
+$script:lblGlobalStats.Location = New-Object System.Drawing.Point(20, 260)
+$script:lblGlobalStats.Size = New-Object System.Drawing.Size(840, 20)
+$script:lblGlobalStats.Text = 'Global folders - Seen: 0 | Completed: 0 || Global files - Copied: 0 | Skipped: 0 | Errors: 0'
+$form.Controls.Add($script:lblGlobalStats)
+
+$script:lblFolderStats = New-Object System.Windows.Forms.Label
+$script:lblFolderStats.Location = New-Object System.Drawing.Point(20, 285)
+$script:lblFolderStats.Size = New-Object System.Drawing.Size(840, 20)
+$script:lblFolderStats.Text = 'Current folder files - Seen: 0 | Pending/Diff: 0'
+$form.Controls.Add($script:lblFolderStats)
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(20, 290)
-$txtLog.Size = New-Object System.Drawing.Size(840, 360)
+$txtLog.Location = New-Object System.Drawing.Point(20, 315)
+$txtLog.Size = New-Object System.Drawing.Size(840, 335)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = 'Vertical'
 $txtLog.ReadOnly = $true
@@ -1230,6 +1546,39 @@ $btnSync.Add_Click({
     }
 
     $targetRoot = $txtTarget.Text
+    $resumeState = Get-PendingSyncStateForContext -SourceDisplay $txtSource.Text -TargetFolder $targetRoot
+    $resumeCompletedTopFolders = @()
+    $resumeLastCompletedTopFolderName = ''
+
+    if ($null -ne $resumeState) {
+        $lastCompletedTopFolderName = [string]$resumeState.LastCompletedTopFolderName
+        $updatedAtText = [string]$resumeState.UpdatedAt
+        $resumeMessage = if ([string]::IsNullOrWhiteSpace($lastCompletedTopFolderName)) {
+            "A previous sync did not finish.`r`n`r`nDo you want to resume the unfinished sync?"
+        }
+        else {
+            "A previous sync did not finish.`r`nLast completed top folder: $lastCompletedTopFolderName`r`nSaved: $updatedAtText`r`n`r`nDo you want to resume from there?"
+        }
+
+        $resumeChoice = [System.Windows.Forms.MessageBox]::Show(
+            $resumeMessage,
+            'Resume previous sync?',
+            [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
+            [System.Windows.Forms.MessageBoxIcon]::Question
+        )
+
+        if ($resumeChoice -eq [System.Windows.Forms.DialogResult]::Cancel) {
+            return
+        }
+
+        if ($resumeChoice -eq [System.Windows.Forms.DialogResult]::Yes) {
+            $resumeCompletedTopFolders = @($resumeState.CompletedTopFolders)
+            $resumeLastCompletedTopFolderName = [string]$resumeState.LastCompletedTopFolderName
+        }
+        else {
+            Clear-PendingSyncState
+        }
+    }
 
     try {
         $script:IsRunning = $true
@@ -1239,12 +1588,18 @@ $btnSync.Add_Click({
 
         Ensure-DirectoryExists -Path $targetRoot
         Update-AppConfigFromUi -SourceDisplay $txtSource.Text -TargetFolder $txtTarget.Text
+        Start-PendingSyncTracking -SourceDisplay $txtSource.Text -TargetFolder $txtTarget.Text
 
         Write-Log -Message ('Starting sync to: {0}' -f $targetRoot) -LogBox $txtLog
         Write-Log -Message ('Using config file: {0}' -f $script:AppConfigPath) -LogBox $txtLog
         Write-Log -Message 'Strategy: one top folder at a time -> warm-up -> diff -> copy -> post-warmup -> stable.' -LogBox $txtLog
 
-        Run-PerTopFolderSync -InternalStorageRootFolder $script:IPhoneSourceFolder -TargetRoot $targetRoot -LogBox $txtLog
+        Run-PerTopFolderSync `
+            -InternalStorageRootFolder $script:IPhoneSourceFolder `
+            -TargetRoot $targetRoot `
+            -LogBox $txtLog `
+            -ResumeCompletedTopFolders $resumeCompletedTopFolders `
+            -ResumeLastCompletedTopFolderName $resumeLastCompletedTopFolderName
 
         if ($script:CancelRequested) {
             [System.Windows.Forms.MessageBox]::Show(
