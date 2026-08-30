@@ -43,6 +43,7 @@ $script:Config = @{
 }
 
 $script:IPhoneSourceFolder = $null
+$script:AppleDeviceName    = $null
 $script:CancelRequested    = $false
 $script:IsRunning          = $false
 $script:AppConfig          = $null
@@ -571,18 +572,20 @@ function Wait-ForFileReady {
 }
 
 # =========================
-# iPhone discovery
+# Apple device discovery
 # =========================
-function Get-IPhoneInternalStorageFolder {
+function Get-AppleDeviceInternalStorageFolder {
     $shell = New-Object -ComObject Shell.Application
     $thisPC = $shell.Namespace(17)
+
+    $script:AppleDeviceName = $null
 
     if ($null -eq $thisPC) {
         return $null
     }
 
     foreach ($device in $thisPC.Items()) {
-        if ($device.Name -eq 'Apple iPhone') {
+        if ($device.Name -in @('Apple iPhone', 'Apple iPad')) {
             try {
                 $deviceFolder = $device.GetFolder()
                 if ($null -eq $deviceFolder) {
@@ -591,6 +594,7 @@ function Get-IPhoneInternalStorageFolder {
 
                 foreach ($child in $deviceFolder.Items()) {
                     if ($child.Name -eq 'Internal Storage') {
+                        $script:AppleDeviceName = $device.Name
                         return $child.GetFolder()
                     }
                 }
@@ -1263,21 +1267,21 @@ function Run-PerTopFolderSync {
         Write-Log -Message ('================ Master round {0} =================' -f $masterRound) -LogBox $LogBox
         Set-Status -Text ('Master round {0}: discovering top folders...' -f $masterRound)
 
-        $freshInternalStorageRootFolder = Get-IPhoneInternalStorageFolder
+        $freshInternalStorageRootFolder = Get-AppleDeviceInternalStorageFolder
         if ($null -ne $freshInternalStorageRootFolder) {
             $InternalStorageRootFolder = $freshInternalStorageRootFolder
         }
         else {
-            Write-Log -Message 'Could not refresh iPhone Internal Storage before discovery. Using existing shell reference.' -LogBox $LogBox
+            Write-Log -Message 'Could not refresh Apple device Internal Storage before discovery. Using existing shell reference.' -LogBox $LogBox
         }
 
         $topFolders = Get-TopFoldersFromInternalStorage -RootFolder $InternalStorageRootFolder
 
         if ($topFolders.Count -eq 0 -and $knownTopFolders.Count -eq 0) {
             $emptyDiscoveryRounds++
-            Write-Log -Message ('Master round {0}: iPhone returned 0 top folders. Empty discovery {1}/{2}' -f $masterRound, $emptyDiscoveryRounds, $script:Config.MasterEmptyDiscoveryTolerance) -LogBox $LogBox
-            Write-Log -Message 'If the iPhone asks whether to trust or allow this PC, unlock it and approve the USB connection.' -LogBox $LogBox
-            Set-Status -Text 'Waiting for iPhone approval/unlock...'
+            Write-Log -Message ('Master round {0}: Apple device returned 0 top folders. Empty discovery {1}/{2}' -f $masterRound, $emptyDiscoveryRounds, $script:Config.MasterEmptyDiscoveryTolerance) -LogBox $LogBox
+            Write-Log -Message 'If the Apple device asks whether to trust or allow this PC, unlock it and approve the USB connection.' -LogBox $LogBox
+            Set-Status -Text 'Waiting for device approval/unlock...'
 
             if ($emptyDiscoveryRounds -lt $script:Config.MasterEmptyDiscoveryTolerance) {
                 Start-Sleep -Seconds 2
@@ -1358,7 +1362,7 @@ function Run-PerTopFolderSync {
 Initialize-AppConfig
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'iPhone Media Sync'
+$form.Text = 'Apple Device Media Sync'
 $form.Size = New-Object System.Drawing.Size(900, 720)
 $form.StartPosition = 'CenterScreen'
 $form.TopMost = $false
@@ -1366,7 +1370,7 @@ $form.TopMost = $false
 $lblSource = New-Object System.Windows.Forms.Label
 $lblSource.Location = New-Object System.Drawing.Point(20, 20)
 $lblSource.Size = New-Object System.Drawing.Size(260, 20)
-$lblSource.Text = 'Source on iPhone (Internal Storage):'
+$lblSource.Text = 'Source on Apple device (Internal Storage):'
 $form.Controls.Add($lblSource)
 
 $txtSource = New-Object System.Windows.Forms.TextBox
@@ -1378,7 +1382,7 @@ $form.Controls.Add($txtSource)
 $btnDetect = New-Object System.Windows.Forms.Button
 $btnDetect.Location = New-Object System.Drawing.Point(730, 43)
 $btnDetect.Size = New-Object System.Drawing.Size(130, 28)
-$btnDetect.Text = 'Find iPhone'
+$btnDetect.Text = 'Find device'
 $form.Controls.Add($btnDetect)
 
 $lblTarget = New-Object System.Windows.Forms.Label
@@ -1477,37 +1481,37 @@ if ($null -ne $script:AppConfig) {
 
 $btnDetect.Add_Click({
     $txtLog.Clear()
-    Write-Log -Message 'Looking for Apple iPhone...' -LogBox $txtLog
-    Set-Status -Text 'Looking for iPhone...'
+    Write-Log -Message 'Looking for Apple iPhone or iPad...' -LogBox $txtLog
+    Set-Status -Text 'Looking for Apple device...'
 
     try {
-        $sourceFolder = Get-IPhoneInternalStorageFolder
+        $sourceFolder = Get-AppleDeviceInternalStorageFolder
 
         if ($null -eq $sourceFolder) {
             [System.Windows.Forms.MessageBox]::Show(
-                'Could not find Apple iPhone\Internal Storage. Make sure the iPhone is connected, unlocked, and trusted on this PC.',
-                'iPhone not found',
+                'Could not find Apple iPhone or iPad\Internal Storage. Make sure the device is connected, unlocked, and trusted on this PC.',
+                'Apple device not found',
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Warning
             ) | Out-Null
 
-            Write-Log -Message 'Could not find Internal Storage on the iPhone.' -LogBox $txtLog
+            Write-Log -Message 'Could not find Internal Storage on an Apple iPhone or iPad.' -LogBox $txtLog
             $txtSource.Text = ''
             $script:IPhoneSourceFolder = $null
             Update-AppConfigFromUi -SourceDisplay '' -TargetFolder $txtTarget.Text
-            Set-Status -Text 'iPhone not found'
+            Set-Status -Text 'Apple device not found'
             return
         }
 
         $script:IPhoneSourceFolder = $sourceFolder
-        $txtSource.Text = 'Apple iPhone\Internal Storage'
+        $txtSource.Text = ('{0}\Internal Storage' -f $script:AppleDeviceName)
         Update-AppConfigFromUi -SourceDisplay $txtSource.Text -TargetFolder $txtTarget.Text
-        Write-Log -Message 'Found iPhone Internal Storage.' -LogBox $txtLog
-        Set-Status -Text 'iPhone found'
+        Write-Log -Message ('Found {0} Internal Storage.' -f $script:AppleDeviceName) -LogBox $txtLog
+        Set-Status -Text ('{0} found' -f $script:AppleDeviceName)
     }
     catch {
-        Write-Log -Message ('Error while searching for iPhone: {0}' -f $_.Exception.Message) -LogBox $txtLog
-        Set-Status -Text 'Error while searching for iPhone'
+        Write-Log -Message ('Error while searching for Apple device: {0}' -f $_.Exception.Message) -LogBox $txtLog
+        Set-Status -Text 'Error while searching for Apple device'
     }
 })
 
@@ -1527,7 +1531,7 @@ $btnCancel.Add_Click({
 $btnSync.Add_Click({
     if ($null -eq $script:IPhoneSourceFolder) {
         [System.Windows.Forms.MessageBox]::Show(
-            'You must click "Find iPhone" first.',
+            'You must click "Find device" first.',
             'Missing source',
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information
